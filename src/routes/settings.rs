@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::AppError;
 use crate::paths;
@@ -14,7 +15,7 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// Application settings persisted to `~/.config/uranium-engine/config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Settings {
     /// Path to a custom Java executable. If `None`, the Mojang bundled runtime
     /// is used (downloaded via `RuntimeDownloader`).
@@ -47,6 +48,14 @@ impl Default for Settings {
 /// `GET /settings` — read the current settings.
 ///
 /// If `config.toml` does not exist, returns sensible defaults.
+#[utoipa::path(
+    get,
+    path = "/settings",
+    tag = "settings",
+    responses(
+        (status = 200, description = "Current settings", body = Settings),
+    )
+)]
 async fn get_settings() -> Result<Json<Settings>, AppError> {
     let config_path = paths::config_file();
     let settings = if config_path.exists() {
@@ -62,6 +71,15 @@ async fn get_settings() -> Result<Json<Settings>, AppError> {
 ///
 /// Accepts a partial or complete [`Settings`] JSON body. Missing fields are
 /// set to `null` (which the server interprets as "use default").
+#[utoipa::path(
+    put,
+    path = "/settings",
+    tag = "settings",
+    request_body = Settings,
+    responses(
+        (status = 200, description = "Settings saved", body = Settings),
+    )
+)]
 async fn put_settings(
     Json(settings): Json<Settings>,
 ) -> Result<Json<Settings>, AppError> {

@@ -10,6 +10,8 @@ use uranium_engine::paths;
 use uranium_engine::routes;
 use uranium_engine::state::AppState;
 
+use strum_macros;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()

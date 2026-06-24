@@ -1,10 +1,40 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::AppError;
+use strum_macros::{Display, EnumString};
+
+
+/// Minecraft instance status.
+#[derive(Debug, Clone, Serialize, Deserialize, EnumString, Display, PartialEq, Eq, ToSchema)]
+#[strum(serialize_all="snake_case")]
+pub enum InstanceStatus {
+    Downloading,
+    Ready,
+    Error,
+    Running
+}
+
+// Source - https://stackoverflow.com/a/73070517
+// Posted by cdhowie, modified by community. See post 'Timeline' for change history
+// Retrieved 2026-06-17, License - CC BY-SA 4.0
+impl rusqlite::ToSql for InstanceStatus {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl rusqlite::types::FromSql for InstanceStatus {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str()?.parse()
+            .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+    }
+}
+
 
 /// A Minecraft instance stored in the database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Instance {
     /// UUIDv4 unique identifier.
     pub id: String,
@@ -18,16 +48,19 @@ pub struct Instance {
     /// (`{data_dir}/instances/{id}`).
     pub game_dir: String,
     /// Current status: `"downloading"`, `"ready"`, or `"error"`.
-    pub status: String,
+    #[schema(example = "ready")]
+    pub status: InstanceStatus,
     /// ISO 8601 creation timestamp.
     pub created_at: String,
     /// ISO 8601 timestamp of the last time the game was played, or `None`.
     pub last_played: Option<String>,
     /// Total accumulated playtime in seconds.
     pub playtime_seconds: i64,
-    /// Java runtime path.
+    /// Java runtime path (executable name or path).
+    #[schema(example = "java")]
     pub java_runtime: String,
-    /// Java args.
+    /// Additional JVM arguments for this instance.
+    #[schema(example = "-Dfml.ignoreInvalidMinecraftCertificates=true")]
     pub java_args: String,
 }
 
@@ -161,7 +194,7 @@ pub fn update_status(conn: &Connection, id: &str, status: &str) -> Result<(), Ap
 /// Set accumulated playtime in seconds.
 pub fn update_playtime(conn: &Connection, id: &str, seconds: i64) -> Result<(), AppError> {
     conn.execute(
-        "UPDATE instances SET playtime_seconds = ?1 WHERE id = ?2",
+        "UPDATE instances SET playtime_seconds = playtime_seconds + ?1 WHERE id = ?2",
         params![seconds, id],
     )?;
     Ok(())

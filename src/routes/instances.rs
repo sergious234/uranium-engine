@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use uranium_rs::downloaders::{Downloader, MinecraftDownloadState, MinecraftDownloader};
@@ -27,34 +28,42 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// Request body for [`create_instance`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInstanceRequest {
     /// Display name for the new instance (e.g. `"My 1.21"`).
+    #[schema(example = "My 1.21 Survival")]
     name: String,
     /// Minecraft version string (e.g. `"1.21"`, `"1.20.4"`).
+    #[schema(example = "1.21")]
     version: String,
     /// Optional icon name. Defaults to `"Grass"` if omitted.
     /// Matches Minecraft launcher profile icon names.
+    #[schema(example = "Diamond")]
     icon: Option<String>,
 }
 
 /// Response returned by [`create_instance`] on success (202 Accepted).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CreateInstanceResponse {
     /// The UUID assigned to the new instance.
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
     instance_id: String,
 }
 
 /// Request body for [`patch_instance`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchInstanceRequest {
     /// New name for the instance. Omit to keep existing.
+    #[schema(example = "Renamed Instance")]
     name: Option<String>,
     /// New icon for the instance. Omit to keep existing.
+    #[schema(example = "Grass")]
     icon: Option<String>,
     /// New runtime path. Omit to keep existing.
+    #[schema(example = "/usr/lib/jvm/java-21-openjdk/bin/java")]
     java_runtime: Option<String>,
     /// New java args. Omit to keep existing.
+    #[schema(example = "-Xmx4G -XX:+UseG1GC")]
     java_args: Option<String>
 }
 
@@ -62,6 +71,14 @@ pub struct PatchInstanceRequest {
 ///
 /// Returns an array of [`Instance`](crate::db::instances::Instance) objects
 /// ordered by creation date (newest first).
+#[utoipa::path(
+    get,
+    path = "/instances",
+    tag = "instances",
+    responses(
+        (status = 200, description = "Array of all instances", body = Vec<crate::db::instances::Instance>),
+    )
+)]
 async fn list_instances(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<db::instances::Instance>>, AppError> {
@@ -73,6 +90,18 @@ async fn list_instances(
 /// `GET /instances/{id}` — get a single instance by ID.
 ///
 /// Returns 404 if the instance does not exist.
+#[utoipa::path(
+    get,
+    path = "/instances/{id}",
+    tag = "instances",
+    params(
+        ("id" = String, Path, description = "Instance UUID"),
+    ),
+    responses(
+        (status = 200, description = "Instance found", body = crate::db::instances::Instance),
+        (status = 404, description = "Instance not found"),
+    )
+)]
 async fn get_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -94,6 +123,16 @@ async fn get_instance(
 /// [`instance:error`](AppEvent::InstanceError) when finished.
 ///
 /// Returns **202 Accepted** with the new instance UUID.
+#[utoipa::path(
+    post,
+    path = "/instances",
+    tag = "instances",
+    request_body = CreateInstanceRequest,
+    responses(
+        (status = 202, description = "Instance created, download started", body = CreateInstanceResponse),
+        (status = 500, description = "Internal server error"),
+    )
+)]
 async fn create_instance(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateInstanceRequest>,
@@ -108,7 +147,7 @@ async fn create_instance(
         game_version: req.version.clone(),
         icon: req.icon.unwrap_or_else(|| "Grass".to_string()),
         game_dir: game_dir.to_string_lossy().to_string(),
-        status: "downloading".to_string(),
+        status: db::instances::InstanceStatus::Downloading,
         created_at: now,
         last_played: None,
         playtime_seconds: 0,
@@ -224,10 +263,23 @@ async fn background_download(
     });
 }
 
-/// `PATCH /instances/{id}` — update an instance's name and/or icon.
+/// `PATCH /instances/{id}` — update an instance's name, icon, runtime, and/or args.
 ///
-/// Both fields are optional; only provided fields are updated.
+/// All fields are optional; only provided fields are updated.
 /// Returns the updated [`Instance`](crate::db::instances::Instance).
+#[utoipa::path(
+    patch,
+    path = "/instances/{id}",
+    tag = "instances",
+    params(
+        ("id" = String, Path, description = "Instance UUID"),
+    ),
+    request_body = PatchInstanceRequest,
+    responses(
+        (status = 200, description = "Instance updated", body = crate::db::instances::Instance),
+        (status = 404, description = "Instance not found"),
+    )
+)]
 async fn patch_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -263,6 +315,18 @@ async fn patch_instance(
 ///
 /// Removes the instance from the database and recursively deletes its game
 /// directory. Returns 404 if the instance does not exist.
+#[utoipa::path(
+    delete,
+    path = "/instances/{id}",
+    tag = "instances",
+    params(
+        ("id" = String, Path, description = "Instance UUID"),
+    ),
+    responses(
+        (status = 200, description = "Instance deleted successfully"),
+        (status = 404, description = "Instance not found"),
+    )
+)]
 async fn delete_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
