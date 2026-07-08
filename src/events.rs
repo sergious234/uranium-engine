@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use utoipa::ToSchema;
 
 /// Events broadcast by the server to all connected WebSocket clients.
 ///
@@ -9,7 +10,7 @@ use tokio::sync::broadcast;
 /// ```json
 /// {"event":"instance:progress","data":{"instance_id":"...","phase":"...","remaining":0}}
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "event", content = "data")]
 pub enum AppEvent {
     /// Emitted during background instance download to report the current phase

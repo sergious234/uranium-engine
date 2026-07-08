@@ -154,14 +154,22 @@ async fn launch_instance(
     let version_type = root.version_type.clone();
 
     let max_memory = load_max_memory();
+    let mut jvm_args = resolve_jvm_arguments(&root, &game_dir, &version, &version_type);
+    jvm_args.retain(|s| !s.is_empty());
 
     let mut cmd = Command::new(&java_bin_str);
-    cmd.arg(&max_memory)
-        .arg("-cp")
-        .arg(&classpath)
-        .arg(&main_class);
+    cmd.arg(&max_memory);
 
-    let game_args = resolve_game_arguments(&root, &game_dir, &version, &version_type);
+    if std::env::vars().any(|(k, _v)| k == "JVM_ARGS_ON") {
+        for arg in &jvm_args {
+            cmd.arg(arg);
+        }
+    }
+
+    cmd.arg("-cp").arg(&classpath).arg(&main_class);
+
+    let mut game_args = resolve_game_arguments(&root, &game_dir, &version, &version_type);
+    game_args.retain(|s| !s.is_empty());
     for arg in &game_args {
         cmd.arg(arg);
     }
@@ -461,7 +469,6 @@ async fn list_running(
 /// Paths are joined with `:` (Unix separator). Only existing files on disk are
 /// included.
 fn build_classpath(game_dir: &std::path::Path, root: &Root) -> Result<String, AppError> {
-    let os = std::env::consts::OS;
     let version_jar = game_dir
         .join("versions")
         .join(&root.id)
@@ -470,17 +477,22 @@ fn build_classpath(game_dir: &std::path::Path, root: &Root) -> Result<String, Ap
     let mut paths = vec![version_jar.to_string_lossy().to_string()];
 
     for lib in root.libraries.iter() {
-        if let Some(lib_os) = lib.get_os() {
-            let lib_os_str = format!("{lib_os:?}");
-            if lib_os_str.to_lowercase() != os && lib_os_str != "Other" {
-                continue;
-            }
-        }
-
-        if let Some(rel_path) = lib.get_rel_path() {
+        if let Some(rel_path) = lib.get_rel_path()
+            && lib.applies()
+        {
             let lib_path = game_dir.join("libraries").join(rel_path);
             if lib_path.exists() {
                 paths.push(lib_path.to_string_lossy().to_string());
+            }
+
+            // There are libs that have a duplicate download field and the actual lib (a native
+            // library usually) yields under the classifier.
+            // https://piston-meta.mojang.com/v1/packages/e0e7ab5ed6f55bbd874ef95be3c9356d67e64b57/1.17.1.json
+            if let Some(classifier) = lib.get_os_classifier() {
+                let lib_path = game_dir.join("libraries").join(&classifier.path);
+                if lib_path.exists() {
+                    paths.push(lib_path.to_string_lossy().to_string());
+                }
             }
         }
     }
@@ -512,9 +524,10 @@ fn resolve_game_arguments(
                     version_type,
                     asset_index,
                 ));
+                info!("Pushed single arg: {s}")
             }
             minecraft::GameArgument::Object { rules, value } => {
-                let allowed = verify_rules(rules);
+                let allowed = rules.iter().all(Rule::applies);
 
                 if allowed {
                     match value {
@@ -526,6 +539,7 @@ fn resolve_game_arguments(
                                 version_type,
                                 asset_index,
                             ));
+                            info!("Pushed single arg object: {s}")
                         }
                         minecraft::ValueType::Multiple(v) => {
                             for s in v.iter() {
@@ -536,6 +550,7 @@ fn resolve_game_arguments(
                                     version_type,
                                     asset_index,
                                 ));
+                                info!("Pushed multiple arg object: {s}")
                             }
                         }
                     }
@@ -547,28 +562,61 @@ fn resolve_game_arguments(
     args
 }
 
-fn verify_rules(rules: &[Rule]) -> bool {
-    rules.iter().all(|rule| {
-        if rule.action == "disallow" {
-            if let Some(os_rule) = &rule.os {
-                return !os_matches(os_rule);
-            }
-            return false;
-        }
-        if let Some(os_rule) = &rule.os {
-            return os_matches(os_rule);
-        }
-        true
-    })
-}
+fn resolve_jvm_arguments(
+    root: &Root,
+    game_dir: &std::path::Path,
+    version: &str,
+    version_type: &str,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    let asset_index = &root.asset_index.id;
 
-/// Check whether an [`Os`] rule matches the current platform.
-fn os_matches(os: &minecraft::Os) -> bool {
-    let current_os = std::env::consts::OS;
-    matches!(
-        (os, current_os),
-        (minecraft::Os::Linux, "linux") | (minecraft::Os::Windows, "windows")
-    )
+    for arg in root.arguments.jvm.iter() {
+        match arg {
+            minecraft::GameArgument::String(s) => {
+                args.push(substitute_tokens(
+                    s,
+                    game_dir,
+                    version,
+                    version_type,
+                    asset_index,
+                ));
+                info!("Pushed single arg: {s}")
+            }
+            minecraft::GameArgument::Object { rules, value } => {
+                let allowed = rules.iter().all(Rule::applies);
+
+                if allowed {
+                    match value {
+                        minecraft::ValueType::Single(s) => {
+                            args.push(substitute_tokens(
+                                s,
+                                game_dir,
+                                version,
+                                version_type,
+                                asset_index,
+                            ));
+                            info!("Pushed single arg object: {s}")
+                        }
+                        minecraft::ValueType::Multiple(v) => {
+                            for s in v.iter() {
+                                args.push(substitute_tokens(
+                                    s,
+                                    game_dir,
+                                    version,
+                                    version_type,
+                                    asset_index,
+                                ));
+                                info!("Pushed multiple arg object: {s}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    args
 }
 
 /// Substitute known `${...}` tokens in a Minecraft game argument string.
@@ -598,7 +646,7 @@ fn substitute_tokens(
         .replace("${auth_uuid}", "00000000-0000-0000-0000-000000000000")
         .replace("${auth_access_token}", "0")
         .replace("${user_properties}", "{}")
-        //.replace("${user_type}", "msa")
+        .replace("${user_type}", "msa")
         .replace("--quickPlayPath", "")
         .replace("${quickPlayPath}", "")
         .replace("--quickPlaySingleplayer", "")
@@ -614,11 +662,7 @@ fn substitute_tokens(
         .replace("${launcher_version}", "0.1.0")
         .replace(
             "${natives_directory}",
-            &game_dir
-                .join("versions")
-                .join(version)
-                .join(format!("{version}-natives"))
-                .to_string_lossy(),
+            &game_dir.join("natives").to_string_lossy(),
         )
         .replace(
             "${library_directory}",
@@ -626,6 +670,7 @@ fn substitute_tokens(
         )
         .replace("${classpath_separator}", ":")
         .replace("${classpath}", "")
+        .replace("-cp", "")
 }
 
 /// Read the `max_memory` setting from `config.toml`.
@@ -751,18 +796,6 @@ mod tests {
             "19",
         );
         assert_eq!(result, "-cp ");
-    }
-
-    #[test]
-    fn test_os_matches_linux() {
-        let result = os_matches(&uranium_rs::mine_data_structs::minecraft::Os::Linux);
-        assert!(result == cfg!(target_os = "linux"));
-    }
-
-    #[test]
-    fn test_os_matches_windows() {
-        let result = os_matches(&uranium_rs::mine_data_structs::minecraft::Os::Windows);
-        assert!(result == cfg!(target_os = "windows"));
     }
 
     #[test]

@@ -4,10 +4,14 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use fs_extra::dir::get_size;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use tracing::{info, warn};
+
+use uranium_rs::downloaders::list_instances as get_mc_versions;
 use uranium_rs::downloaders::{Downloader, MinecraftDownloadState, MinecraftDownloader};
 
 use crate::db;
@@ -25,6 +29,8 @@ pub fn router() -> Router<Arc<AppState>> {
                 .patch(patch_instance)
                 .delete(delete_instance),
         )
+        .route("/mc-versions", get(mc_versions))
+        .route("/instances/clean", get(clean))
 }
 
 /// Request body for [`create_instance`].
@@ -40,6 +46,8 @@ pub struct CreateInstanceRequest {
     /// Matches Minecraft launcher profile icon names.
     #[schema(example = "Diamond")]
     icon: Option<String>,
+    #[schema(example = "-Xmx1024G")]
+    java_args: Option<String>,
 }
 
 /// Response returned by [`create_instance`] on success (202 Accepted).
@@ -64,7 +72,32 @@ pub struct PatchInstanceRequest {
     java_runtime: Option<String>,
     /// New java args. Omit to keep existing.
     #[schema(example = "-Xmx4G -XX:+UseG1GC")]
-    java_args: Option<String>
+    java_args: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CleanResponse {
+    pub removed_instances: Vec<String>,
+    pub freed_memory: u64,
+}
+
+/// `GET /mc-versions` — list of all minecraft versions.
+///
+/// Returns an array of `String`.
+#[utoipa::path(
+    get,
+    path = "/mc-versions",
+    tag = "mc",
+    responses(
+        (status = 200, description = "Array of all versions"),
+    )
+)]
+async fn mc_versions(State(_state): State<Arc<AppState>>) -> Result<Json<Vec<String>>, AppError> {
+    let mc_versions = get_mc_versions()
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?;
+    let ids = Vec::from_iter(mc_versions.versions.into_iter().map(|v| v.id));
+    Ok(Json(ids))
 }
 
 /// `GET /instances` — list all instances.
@@ -152,7 +185,7 @@ async fn create_instance(
         last_played: None,
         playtime_seconds: 0,
         java_runtime: "java".to_string(),
-        java_args: "".to_string()
+        java_args: req.java_args.unwrap_or_default(),
     };
 
     {
@@ -222,6 +255,7 @@ async fn background_download(
             Ok(ds) => {
                 let phase = format!("{ds:?}");
                 let remaining = downloader.requests_left();
+                info!("Remaining requests: {remaining}");
                 let _ = state.event_tx.send(AppEvent::InstanceProgress {
                     instance_id: instance_id.clone(),
                     phase,
@@ -343,4 +377,52 @@ async fn delete_instance(
     }
 
     Ok(Json(serde_json::json!({ "deleted": id })))
+}
+
+/// `POST /instances/clean` — remove orphaned instance directories.
+///
+/// Scans the instances data directory and removes any subdirectory that does
+/// not correspond to an instance in the database. Useful for cleaning up after
+/// manual filesystem changes or failed instance deletions.
+///
+/// Returns **200 OK** with a [`CleanResponse`] containing the list of removed
+/// directory names and the total freed disk space in bytes.
+#[utoipa::path(
+    get,
+    path = "/instances/clean",
+    tag = "instances",
+    responses(
+        (status = 200, description = "Orphaned directories removed", body = CleanResponse),
+    )
+)]
+async fn clean(State(state): State<Arc<AppState>>) -> Result<Json<CleanResponse>, AppError> {
+    use crate::db::instances::get_all;
+    let instances = get_all(&state.db.lock().unwrap())?;
+    let instances_dir = paths::instances_dir();
+
+    let mut freed_memory = 0;
+    let mut removed_instances = vec![];
+    for entry in instances_dir.read_dir()? {
+        info!("Entry {:?}", entry.as_ref().unwrap().path());
+        if let Ok(dir) = entry
+            && !instances
+                .iter()
+                .any(|i| std::path::Path::new(&i.game_dir) == dir.path())
+        {
+            match std::fs::remove_dir_all(dir.path()) {
+                Ok(_) => {
+                    info!(
+                        "{:?}\n{:?} is not in the DataBase, will be removed.",
+                        dir.path(),
+                        dir.file_name()
+                    );
+                    freed_memory += get_size(dir.path()).unwrap_or(2);
+                    removed_instances.push(dir.file_name().display().to_string());
+                }
+                Err(err) => warn!("Error when removing {:?}, {err}", dir.file_name()),
+            };
+        }
+    }
+
+    Ok(Json(CleanResponse{removed_instances, freed_memory}))
 }

@@ -14,6 +14,7 @@ pub mod ws;
 #[openapi(
     paths(
         health,
+        ws::ws_handler,
         instances::list_instances,
         instances::create_instance,
         instances::get_instance,
@@ -24,9 +25,12 @@ pub mod ws;
         launcher::list_running,
         settings::get_settings,
         settings::put_settings,
+        instances::mc_versions,
+        instances::clean
     ),
     components(
         schemas(
+            crate::events::AppEvent,
             crate::db::instances::Instance,
             instances::CreateInstanceRequest,
             instances::CreateInstanceResponse,
@@ -38,10 +42,12 @@ pub mod ws;
         )
     ),
     tags(
+        (name = "events", description = "Real-time event stream via WebSocket — broadcasts instance and game lifecycle events as JSON text frames"),
         (name = "health", description = "Server health checks"),
         (name = "instances", description = "Minecraft instance CRUD — create, list, get, patch, and delete instances"),
         (name = "launcher", description = "Launch, terminate, and query running Minecraft game instances"),
         (name = "settings", description = "Application settings — read and write persistent configuration"),
+        (name = "mc", description = "Minecraft related information or data"),
     )
 )]
 pub struct ApiDoc;

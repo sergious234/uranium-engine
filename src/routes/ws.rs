@@ -27,6 +27,14 @@ pub fn router() -> Router<Arc<AppState>> {
 /// The server does **not** currently process messages from the client (the
 /// connection is read-only from the client's perspective). Client messages are
 /// silently drained to keep the connection alive.
+#[utoipa::path(
+    get,
+    path = "/ws",
+    tag = "events",
+    responses(
+        (status = 101, description = "WebSocket upgrade successful — connection switches to the WebSocket protocol. The server immediately begins sending JSON text frames of [`AppEvent`] values.")
+    )
+)]
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
