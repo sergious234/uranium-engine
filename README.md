@@ -201,6 +201,12 @@ Files follow XDG Base Directory Specification:
 
 ## Build
 
+Clone with submodules (vendored `uranium-rs`):
+
+```bash
+git clone --recurse-submodules <url>
+```
+
 ```bash
 cargo build --release
 ```

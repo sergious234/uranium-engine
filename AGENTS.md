@@ -19,7 +19,7 @@ HTTP + WebSocket server wrapping `uranium-rs` for launcher GUIs. Single crate (`
 - `src/events.rs` — `AppEvent` (`#[serde(tag="event", content="data")]`) + `PhaseProgressTracker`.
 - `src/db/` — `schema.sql` + `mod.rs::MIGRATION_COLUMNS` (idempotent `PRAGMA table_info` backfill). Add new columns in **both**.
 - `src/paths.rs` — XDG dirs via `dirs` crate (`~/.config`, `~/.local/share`, `~/.cache`). Tests do **not** override these.
-- Sibling lib: `uranium-rs = { path = "../uranium-rs" }`. Engine can't fix lib bugs; after a lib pull run `cargo update -p uranium-rs` + full suite.
+- Vendored lib: `uranium-rs` (`dev` branch) is a git submodule at `./uranium-rs` (see `.gitmodules`). Clone with `git clone --recurse-submodules <url>`; update via `git submodule update --remote` + `cargo update -p uranium-rs` + full suite. Engine can't fix lib bugs; lib changes land in their repo first, then bump the pinned SHA here.
 
 ## Conventions / gotchas
 
