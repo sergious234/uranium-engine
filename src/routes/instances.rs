@@ -35,6 +35,39 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/instances/clean", get(clean))
 }
 
+/// Restore downloads that were interrupted when the previous engine process exited.
+/// Existing files are verified by the downloader before they are reused.
+pub async fn resume_pending(state: Arc<AppState>) {
+    let pending = {
+        let db = state.db.lock().unwrap();
+        match db::instances::get_all(&db) {
+            Ok(instances) => instances
+                .into_iter()
+                .filter(|instance| instance.status == db::instances::InstanceStatus::Downloading)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::error!("Could not list interrupted installs: {error}");
+                return;
+            }
+        }
+    };
+
+    for instance in pending {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let game_dir = std::path::PathBuf::from(&instance.game_dir);
+            match instance.modpack_source {
+                db::instances::ModpackSource::Vanilla => {
+                    background_download(state, instance, game_dir).await;
+                }
+                db::instances::ModpackSource::Mrpack => {
+                    super::modpacks::resume_mrpack(state, instance, game_dir).await;
+                }
+            }
+        });
+    }
+}
+
 /// Request body for [`create_instance`].
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInstanceRequest {

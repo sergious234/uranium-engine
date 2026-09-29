@@ -41,6 +41,8 @@ async fn main() {
         active_operations: Mutex::new(HashSet::new()),
     });
 
+    tokio::spawn(routes::instances::resume_pending(state.clone()));
+
     let app = routes::router(state).layer(CorsLayer::permissive());
 
     let addr = "127.0.0.1:13715";
