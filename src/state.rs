@@ -12,6 +12,7 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<AppEvent>,
     pub running: Arc<Mutex<HashMap<String, RunningGame>>>,
     pub active_operations: Mutex<HashSet<String>>,
+    pub auth_token: String,
 }
 
 impl AppState {

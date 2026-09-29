@@ -16,6 +16,15 @@ impl TestApp {
     fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
+
+    fn client(&self) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-uranium-token", "test-token".parse().unwrap());
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
 }
 
 async fn setup() -> TestApp {
@@ -29,6 +38,7 @@ async fn setup() -> TestApp {
         event_tx,
         running: Arc::new(Mutex::new(HashMap::new())),
         active_operations: Mutex::new(HashSet::new()),
+        auth_token: "test-token".into(),
     });
 
     let app = uranium_engine::routes::router(state);
@@ -84,7 +94,8 @@ fn write_mrpack(dir: &Path, name: &str, index: &serde_json::Value) -> PathBuf {
 #[tokio::test]
 async fn test_mrpack_missing_file_returns_400() {
     let app = setup().await;
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
             "name": "Missing",
@@ -101,7 +112,8 @@ async fn test_mrpack_wrong_extension_returns_400() {
     let app = setup().await;
     let path = app.pack_dir.join("pack.txt");
     std::fs::write(&path, "not a pack").unwrap();
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
             "name": "WrongExt",
@@ -118,7 +130,8 @@ async fn test_mrpack_invalid_zip_returns_400() {
     let app = setup().await;
     let path = app.pack_dir.join("bogus.mrpack");
     std::fs::write(&path, "this is not a zip").unwrap();
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
             "name": "Bogus",
@@ -138,7 +151,8 @@ async fn test_mrpack_missing_version_returns_400() {
         "nodeps.mrpack",
         &index_json(serde_json::json!({})),
     );
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
             "name": "NoDeps",
@@ -166,7 +180,7 @@ async fn test_mrpack_accepts_and_persists_row() {
 
     // Bogus override so the background vanilla install fails fast at version
     // lookup (online and offline) instead of downloading a real version.
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
@@ -207,7 +221,8 @@ async fn test_mrpack_accepts_and_persists_row() {
 #[tokio::test]
 async fn test_openapi_contains_mrpack_routes() {
     let app = setup().await;
-    let spec: serde_json::Value = reqwest::Client::new()
+    let spec: serde_json::Value = app
+        .client()
         .get(app.url("/api-docs/openapi.json"))
         .send()
         .await
@@ -235,7 +250,8 @@ async fn test_mrpack_forge_returns_400() {
             "forge": "47.0.0",
         })),
     );
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
             "name": "Forge Pack",
@@ -252,7 +268,8 @@ async fn test_mrpack_forge_returns_400() {
 #[tokio::test]
 async fn test_loader_install_unknown_instance_returns_404() {
     let app = setup().await;
-    let resp = reqwest::Client::new()
+    let resp = app
+        .client()
         .post(app.url("/instances/no-such-id/loader"))
         .send()
         .await
@@ -263,7 +280,7 @@ async fn test_loader_install_unknown_instance_returns_404() {
 #[tokio::test]
 async fn test_loader_install_not_ready_returns_400() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let create_resp = client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "Vanilla", "version": "1.21"}))
@@ -294,7 +311,7 @@ async fn test_loader_install_mrpack_downloading_returns_400() {
             "fabric-loader": "0.16.9",
         })),
     );
-    let client = reqwest::Client::new();
+    let client = app.client();
     let create_resp = client
         .post(app.url("/instances/mrpack"))
         .json(&serde_json::json!({
