@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
@@ -21,8 +21,11 @@ pub fn router() -> Router<Arc<AppState>> {
 /// the client. Each message is a complete JSON object:
 ///
 /// ```json
-/// {"event":"instance:progress","data":{"instance_id":"...","phase":"...","remaining":0}}
+/// {"event":"instance:progress","data":{"instance_id":"...","phase":"...","remaining":0,"total":120}}
 /// ```
+///
+/// Progress frames carry `remaining`/`total` batch counts per phase; clients
+/// render `done = total - remaining`. `total` is absent while unknown.
 ///
 /// The server does **not** currently process messages from the client (the
 /// connection is read-only from the client's perspective). Client messages are
@@ -35,10 +38,7 @@ pub fn router() -> Router<Arc<AppState>> {
         (status = 101, description = "WebSocket upgrade successful — connection switches to the WebSocket protocol. The server immediately begins sending JSON text frames of [`AppEvent`] values.")
     )
 )]
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rx = state.event_tx.subscribe();
     ws.on_upgrade(move |socket| handle_socket(socket, rx))
 }

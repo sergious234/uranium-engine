@@ -1,19 +1,19 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::AppError;
 use strum_macros::{Display, EnumString};
 
-
 /// Minecraft instance status.
 #[derive(Debug, Clone, Serialize, Deserialize, EnumString, Display, PartialEq, Eq, ToSchema)]
-#[strum(serialize_all="snake_case")]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum InstanceStatus {
     Downloading,
     Ready,
     Error,
-    Running
+    Running,
 }
 
 // Source - https://stackoverflow.com/a/73070517
@@ -27,11 +27,36 @@ impl rusqlite::ToSql for InstanceStatus {
 
 impl rusqlite::types::FromSql for InstanceStatus {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        value.as_str()?.parse()
+        value
+            .as_str()?
+            .parse()
             .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
     }
 }
 
+/// Where an instance's files came from.
+#[derive(Debug, Clone, Serialize, Deserialize, EnumString, Display, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ModpackSource {
+    Vanilla,
+    Mrpack,
+}
+
+impl rusqlite::ToSql for ModpackSource {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl rusqlite::types::FromSql for ModpackSource {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+    }
+}
 
 /// A Minecraft instance stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -62,13 +87,26 @@ pub struct Instance {
     /// Additional JVM arguments for this instance.
     #[schema(example = "-Dfml.ignoreInvalidMinecraftCertificates=true")]
     pub java_args: String,
+    /// Where the instance files came from: `"vanilla"` or `"mrpack"`.
+    pub modpack_source: ModpackSource,
+    /// Local `.mrpack` path the instance was created from, if any.
+    pub modpack_path: Option<String>,
+    /// Mod loader required by the pack (`"Fabric"`, `"Forge"`, ...), if any.
+    /// Loader installation itself is not implemented yet.
+    pub loader: Option<String>,
+    /// Version of [`Instance::loader`], if any.
+    pub loader_version: Option<String>,
+    /// Installed loader profile id (e.g. `"fabric-loader-0.16.9-1.21"`).
+    /// `None` for vanilla instances and for modpack instances whose loader
+    /// has not been installed yet. The GUI gates Play on this field.
+    pub loader_profile: Option<String>,
 }
 
 /// Insert a new instance into the database.
 pub fn insert(conn: &Connection, instance: &Instance) -> Result<(), AppError> {
     conn.execute(
-        "INSERT INTO instances (id, name, game_version, icon, game_dir, status, created_at, java_runtime, java_args)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO instances (id, name, game_version, icon, game_dir, status, created_at, java_runtime, java_args, modpack_source, modpack_path, loader, loader_version, loader_profile)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             instance.id,
             instance.name,
@@ -79,6 +117,11 @@ pub fn insert(conn: &Connection, instance: &Instance) -> Result<(), AppError> {
             instance.created_at,
             instance.java_runtime,
             instance.java_args,
+            instance.modpack_source,
+            instance.modpack_path,
+            instance.loader,
+            instance.loader_version,
+            instance.loader_profile,
         ],
     )?;
     Ok(())
@@ -87,7 +130,7 @@ pub fn insert(conn: &Connection, instance: &Instance) -> Result<(), AppError> {
 /// Retrieve all instances, ordered by creation date descending.
 pub fn get_all(conn: &Connection) -> Result<Vec<Instance>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, game_version, icon, game_dir, status, created_at, last_played, playtime_seconds, java_runtime, java_args
+        "SELECT id, name, game_version, icon, game_dir, status, created_at, last_played, playtime_seconds, java_runtime, java_args, modpack_source, modpack_path, loader, loader_version, loader_profile
          FROM instances ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -102,7 +145,12 @@ pub fn get_all(conn: &Connection) -> Result<Vec<Instance>, AppError> {
             last_played: row.get(7)?,
             playtime_seconds: row.get(8)?,
             java_runtime: row.get(9)?,
-            java_args: row.get(10)?
+            java_args: row.get(10)?,
+            modpack_source: row.get(11)?,
+            modpack_path: row.get(12)?,
+            loader: row.get(13)?,
+            loader_version: row.get(14)?,
+            loader_profile: row.get(15)?,
         })
     })?;
     let mut instances = Vec::new();
@@ -115,7 +163,7 @@ pub fn get_all(conn: &Connection) -> Result<Vec<Instance>, AppError> {
 /// Retrieve a single instance by ID. Returns `None` if not found.
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Instance>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, game_version, icon, game_dir, status, created_at, last_played, playtime_seconds, java_runtime, java_args
+        "SELECT id, name, game_version, icon, game_dir, status, created_at, last_played, playtime_seconds, java_runtime, java_args, modpack_source, modpack_path, loader, loader_version, loader_profile
          FROM instances WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -130,7 +178,12 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Instance>, AppError> {
             last_played: row.get(7)?,
             playtime_seconds: row.get(8)?,
             java_runtime: row.get(9)?,
-            java_args: row.get(10)?
+            java_args: row.get(10)?,
+            modpack_source: row.get(11)?,
+            modpack_path: row.get(12)?,
+            loader: row.get(13)?,
+            loader_version: row.get(14)?,
+            loader_profile: row.get(15)?,
         })
     })?;
     match rows.next() {
@@ -187,6 +240,15 @@ pub fn update_status(conn: &Connection, id: &str, status: &str) -> Result<(), Ap
     conn.execute(
         "UPDATE instances SET status = ?1 WHERE id = ?2",
         params![status, id],
+    )?;
+    Ok(())
+}
+
+/// Record the installed loader profile id (e.g. `"fabric-loader-0.16.9-1.21"`).
+pub fn update_loader_profile(conn: &Connection, id: &str, profile: &str) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE instances SET loader_profile = ?1 WHERE id = ?2",
+        params![profile, id],
     )?;
     Ok(())
 }

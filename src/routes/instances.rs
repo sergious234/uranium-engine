@@ -11,8 +11,10 @@ use uuid::Uuid;
 
 use tracing::{info, warn};
 
-use uranium_rs::downloaders::list_instances as get_mc_versions;
-use uranium_rs::downloaders::{Downloader, MinecraftDownloadState, MinecraftDownloader};
+use uranium_rs::engine::Downloader;
+use uranium_rs::minecraft::list_instances as get_mc_versions;
+use uranium_rs::minecraft::profile::add_instance;
+use uranium_rs::minecraft::{MinecraftDownloadState, MinecraftDownloader};
 
 use crate::db;
 use crate::error::AppError;
@@ -55,7 +57,7 @@ pub struct CreateInstanceRequest {
 pub struct CreateInstanceResponse {
     /// The UUID assigned to the new instance.
     #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
-    instance_id: String,
+    pub instance_id: String,
 }
 
 /// Request body for [`patch_instance`].
@@ -186,6 +188,11 @@ async fn create_instance(
         playtime_seconds: 0,
         java_runtime: "java".to_string(),
         java_args: req.java_args.unwrap_or_default(),
+        modpack_source: db::instances::ModpackSource::Vanilla,
+        modpack_path: None,
+        loader: None,
+        loader_version: None,
+        loader_profile: None,
     };
 
     {
@@ -205,6 +212,23 @@ async fn create_instance(
     ))
 }
 
+/// Write `launcher_profiles.json` (when missing) and register the instance in
+/// it, sharing the download-completion tail between vanilla and modpack
+/// installs.
+pub(crate) fn finalize_download(game_dir: &std::path::Path, instance: &db::instances::Instance) {
+    let profiles_path = game_dir.join("launcher_profiles.json");
+    if !profiles_path.exists() {
+        let profiles = uranium_rs::mine_data_structs::minecraft::ProfilesJson::default();
+        if let Ok(content) = serde_json::to_string_pretty(&profiles) {
+            let _ = std::fs::write(&profiles_path, content);
+        }
+    }
+
+    if let Err(e) = add_instance(game_dir, &instance.id, &instance.name, Some(&instance.icon)) {
+        tracing::warn!("add_instance failed: {e}");
+    }
+}
+
 /// Background task that downloads Minecraft files for a newly created instance.
 ///
 /// The task loops through [`MinecraftDownloader::progress`], broadcasting
@@ -219,8 +243,6 @@ async fn background_download(
     game_dir: std::path::PathBuf,
 ) {
     let instance_id = instance.id.clone();
-    let name = instance.name.clone();
-    let icon = instance.icon.clone();
     let version = instance.game_version.clone();
 
     if let Err(e) = std::fs::create_dir_all(&game_dir) {
@@ -260,6 +282,7 @@ async fn background_download(
                     instance_id: instance_id.clone(),
                     phase,
                     remaining,
+                    total: None,
                 });
             }
             Err(e) => {
@@ -276,17 +299,7 @@ async fn background_download(
         }
     }
 
-    let profiles_path = game_dir.join("launcher_profiles.json");
-    if !profiles_path.exists() {
-        let profiles = uranium_rs::mine_data_structs::minecraft::ProfilesJson::default();
-        if let Ok(content) = serde_json::to_string_pretty(&profiles) {
-            let _ = std::fs::write(&profiles_path, content);
-        }
-    }
-
-    if let Err(e) = downloader.add_instance(&game_dir, &name, Some(&icon)) {
-        tracing::warn!("add_instance failed: {e}");
-    }
+    finalize_download(&game_dir, &instance);
 
     {
         let db = state.db.lock().unwrap();
@@ -342,6 +355,7 @@ async fn patch_instance(
         instance.java_args = args.clone();
     }
 
+    info!(id, "patched");
     Ok(Json(instance))
 }
 
@@ -376,6 +390,7 @@ async fn delete_instance(
         let _ = std::fs::remove_dir_all(game_dir);
     }
 
+    info!(id, "deleted from database");
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
@@ -424,5 +439,8 @@ async fn clean(State(state): State<Arc<AppState>>) -> Result<Json<CleanResponse>
         }
     }
 
-    Ok(Json(CleanResponse{removed_instances, freed_memory}))
+    Ok(Json(CleanResponse {
+        removed_instances,
+        freed_memory,
+    }))
 }

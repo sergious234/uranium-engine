@@ -10,8 +10,7 @@ use crate::paths;
 use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/settings", get(get_settings).put(put_settings))
+    Router::new().route("/settings", get(get_settings).put(put_settings))
 }
 
 /// Application settings persisted to `~/.config/uranium-engine/config.toml`.
@@ -80,16 +79,13 @@ async fn get_settings() -> Result<Json<Settings>, AppError> {
         (status = 200, description = "Settings saved", body = Settings),
     )
 )]
-async fn put_settings(
-    Json(settings): Json<Settings>,
-) -> Result<Json<Settings>, AppError> {
+async fn put_settings(Json(settings): Json<Settings>) -> Result<Json<Settings>, AppError> {
     let config_path = paths::config_file();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = toml::to_string_pretty(&settings).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize settings: {e}"))
-    })?;
+    let content = toml::to_string_pretty(&settings)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize settings: {e}")))?;
     std::fs::write(&config_path, content)?;
     Ok(Json(settings))
 }

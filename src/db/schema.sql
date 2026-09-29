@@ -9,5 +9,10 @@ CREATE TABLE IF NOT EXISTS instances (
     last_played     TEXT,
     playtime_seconds INTEGER DEFAULT 0,
 	java_runtime    TEXT NOT NULL,
-	java_args       TEXT DEFAULT ''
+	java_args       TEXT DEFAULT '',
+	modpack_source  TEXT NOT NULL DEFAULT 'vanilla',
+	modpack_path    TEXT,
+	loader          TEXT,
+	loader_version  TEXT,
+	loader_profile  TEXT
 );

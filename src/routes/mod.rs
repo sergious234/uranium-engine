@@ -7,6 +7,7 @@ use crate::state::AppState;
 
 pub mod instances;
 pub mod launcher;
+pub mod modpacks;
 pub mod settings;
 pub mod ws;
 
@@ -20,6 +21,8 @@ pub mod ws;
         instances::get_instance,
         instances::patch_instance,
         instances::delete_instance,
+        modpacks::create_mrpack_instance,
+        modpacks::install_instance_loader,
         launcher::launch_instance,
         launcher::terminate_instance,
         launcher::list_running,
@@ -32,9 +35,11 @@ pub mod ws;
         schemas(
             crate::events::AppEvent,
             crate::db::instances::Instance,
+            crate::db::instances::ModpackSource,
             instances::CreateInstanceRequest,
             instances::CreateInstanceResponse,
             instances::PatchInstanceRequest,
+            modpacks::CreateMrpackInstanceRequest,
             launcher::LaunchResponse,
             launcher::RunningResponse,
             launcher::RunningEntry,
@@ -61,6 +66,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(ws::router())
         .merge(instances::router())
+        .merge(modpacks::router())
         .merge(launcher::router())
         .merge(settings::router())
         .with_state(state)

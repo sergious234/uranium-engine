@@ -6,12 +6,32 @@ fn test_instance_progress_serialization() {
         instance_id: "uuid-123".into(),
         phase: "DownloadingAssets".into(),
         remaining: 42,
+        total: Some(120),
     };
     let json = serde_json::to_value(&event).unwrap();
     assert_eq!(json["event"], "instance:progress");
     assert_eq!(json["data"]["instance_id"], "uuid-123");
     assert_eq!(json["data"]["phase"], "DownloadingAssets");
     assert_eq!(json["data"]["remaining"], 42);
+    assert_eq!(json["data"]["total"], 120);
+}
+
+#[test]
+fn test_instance_progress_total_omitted_when_unknown() {
+    let event = AppEvent::InstanceProgress {
+        instance_id: "uuid-123".into(),
+        phase: "InstallingMinecraft".into(),
+        remaining: 0,
+        total: None,
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert!(json["data"].get("total").is_none());
+    // Backward compat: old frames without `total` still deserialize.
+    let back: AppEvent = serde_json::from_value(json).unwrap();
+    match back {
+        AppEvent::InstanceProgress { total, .. } => assert_eq!(total, None),
+        _ => panic!("wrong variant"),
+    }
 }
 
 #[test]
@@ -102,6 +122,7 @@ fn test_deserialize_roundtrip() {
         instance_id: "roundtrip".into(),
         phase: "CheckingFiles".into(),
         remaining: 0,
+        total: Some(10),
     };
     let json = serde_json::to_string(&original).unwrap();
     let deserialized: AppEvent = serde_json::from_str(&json).unwrap();
@@ -110,10 +131,12 @@ fn test_deserialize_roundtrip() {
             instance_id,
             phase,
             remaining,
+            total,
         } => {
             assert_eq!(instance_id, "roundtrip");
             assert_eq!(phase, "CheckingFiles");
             assert_eq!(remaining, 0);
+            assert_eq!(total, Some(10));
         }
         _ => panic!("wrong variant after roundtrip"),
     }

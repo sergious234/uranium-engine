@@ -174,8 +174,7 @@ async fn test_patch_instance_rename() {
         .send()
         .await
         .unwrap();
-    let id = create_resp.json::<serde_json::Value>().await.unwrap()
-        ["instance_id"]
+    let id = create_resp.json::<serde_json::Value>().await.unwrap()["instance_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -217,8 +216,7 @@ async fn test_delete_instance() {
         .send()
         .await
         .unwrap();
-    let id = create_resp.json::<serde_json::Value>().await.unwrap()
-        ["instance_id"]
+    let id = create_resp.json::<serde_json::Value>().await.unwrap()["instance_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -339,8 +337,7 @@ async fn test_launch_not_ready() {
         .send()
         .await
         .unwrap();
-    let id = create_resp.json::<serde_json::Value>().await.unwrap()
-        ["instance_id"]
+    let id = create_resp.json::<serde_json::Value>().await.unwrap()["instance_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -387,6 +384,7 @@ async fn test_websocket_receives_instance_progress() {
         instance_id: "progress-test".into(),
         phase: "DownloadingVersion".into(),
         remaining: 0,
+        total: None,
     };
     app.event_tx.send(event).unwrap();
 
@@ -394,8 +392,7 @@ async fn test_websocket_receives_instance_progress() {
         loop {
             match ws_stream.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    let json: serde_json::Value =
-                        serde_json::from_str(&text).unwrap();
+                    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
                     assert_eq!(json["event"], "instance:progress");
                     assert_eq!(json["data"]["instance_id"], "progress-test");
                     assert_eq!(json["data"]["phase"], "DownloadingVersion");
@@ -433,8 +430,7 @@ async fn test_background_download_emits_error_event() {
         loop {
             match ws_stream.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    let json: serde_json::Value =
-                        serde_json::from_str(&text).unwrap();
+                    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
                     if json["event"] == "instance:error" {
                         assert!(!json["data"]["error"].as_str().unwrap().is_empty());
                         return;
