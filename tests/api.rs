@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ struct TestApp {
     addr: String,
     _temp_dir: tempfile::TempDir,
     event_tx: broadcast::Sender<AppEvent>,
+    state: Arc<AppState>,
 }
 
 impl TestApp {
@@ -38,9 +39,10 @@ async fn setup() -> TestApp {
         db: Mutex::new(conn),
         event_tx: event_tx.clone(),
         running: Arc::new(Mutex::new(HashMap::new())),
+        active_operations: Mutex::new(HashSet::new()),
     });
 
-    let app = routes::router(state);
+    let app = routes::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -57,7 +59,31 @@ async fn setup() -> TestApp {
         addr: format!("127.0.0.1:{}", addr.port()),
         _temp_dir: temp_dir,
         event_tx,
+        state,
     }
+}
+
+fn insert_test_instance(app: &TestApp, id: &str, status: db::instances::InstanceStatus) {
+    let instance = db::instances::Instance {
+        id: id.into(),
+        name: "Test".into(),
+        game_version: "1.21".into(),
+        icon: "Grass".into(),
+        game_dir: app._temp_dir.path().join(id).to_string_lossy().to_string(),
+        status,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        last_played: None,
+        playtime_seconds: 0,
+        java_runtime: "java".into(),
+        java_args: String::new(),
+        modpack_source: db::instances::ModpackSource::Vanilla,
+        modpack_path: None,
+        loader: None,
+        loader_version: None,
+        loader_profile: None,
+    };
+    db::instances::insert(&app.state.db.lock().unwrap(), &instance).unwrap();
+    std::fs::create_dir(&instance.game_dir).unwrap();
 }
 
 // ── Health ─────────────────────────────────────────────────────────
@@ -210,16 +236,8 @@ async fn test_patch_instance_not_found() {
 async fn test_delete_instance() {
     let app = setup().await;
     let client = reqwest::Client::new();
-    let create_resp = client
-        .post(app.url("/instances"))
-        .json(&serde_json::json!({"name": "ToDelete", "version": "1.21"}))
-        .send()
-        .await
-        .unwrap();
-    let id = create_resp.json::<serde_json::Value>().await.unwrap()["instance_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = "to-delete";
+    insert_test_instance(&app, id, db::instances::InstanceStatus::Ready);
 
     let resp = client
         .delete(app.url(&format!("/instances/{id}")))
@@ -227,6 +245,7 @@ async fn test_delete_instance() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    assert!(!app._temp_dir.path().join(id).exists());
 
     let resp = client
         .get(app.url(&format!("/instances/{id}")))
@@ -234,6 +253,50 @@ async fn test_delete_instance() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_delete_rejects_installing_and_preserves_files() {
+    let app = setup().await;
+    insert_test_instance(
+        &app,
+        "installing",
+        db::instances::InstanceStatus::Downloading,
+    );
+    let resp = reqwest::Client::new()
+        .delete(app.url("/instances/installing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(app._temp_dir.path().join("installing").exists());
+    assert!(
+        db::instances::get(&app.state.db.lock().unwrap(), "installing")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_delete_rejects_running_and_preserves_files() {
+    let app = setup().await;
+    insert_test_instance(&app, "running", db::instances::InstanceStatus::Ready);
+    let (kill_tx, _) = tokio::sync::oneshot::channel();
+    app.state.running.lock().unwrap().insert(
+        "running".into(),
+        uranium_engine::state::RunningGame {
+            pid: 123,
+            started_at: std::time::Instant::now(),
+            kill_tx: Some(kill_tx),
+        },
+    );
+    let resp = reqwest::Client::new()
+        .delete(app.url("/instances/running"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(app._temp_dir.path().join("running").exists());
 }
 
 #[tokio::test]

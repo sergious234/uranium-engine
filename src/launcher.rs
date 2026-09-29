@@ -939,6 +939,7 @@ mod tests {
             db: Mutex::new(conn),
             event_tx,
             running: Arc::new(Mutex::new(HashMap::new())),
+            active_operations: Mutex::new(HashSet::new()),
         });
 
         let mut instance = crate::db::instances::Instance {

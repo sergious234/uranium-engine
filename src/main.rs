@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use tower_http::cors::CorsLayer;
@@ -38,6 +38,7 @@ async fn main() {
         db: Mutex::new(conn),
         event_tx,
         running: Arc::new(Mutex::new(HashMap::new())),
+        active_operations: Mutex::new(HashSet::new()),
     });
 
     let app = routes::router(state).layer(CorsLayer::permissive());

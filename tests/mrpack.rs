@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,7 @@ async fn setup() -> TestApp {
         db: Mutex::new(conn),
         event_tx,
         running: Arc::new(Mutex::new(HashMap::new())),
+        active_operations: Mutex::new(HashSet::new()),
     });
 
     let app = uranium_engine::routes::router(state);

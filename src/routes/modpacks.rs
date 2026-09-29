@@ -283,6 +283,7 @@ async fn install_instance_loader(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<CreateInstanceResponse>), AppError> {
+    let operation = state.reserve(&id)?;
     let instance = {
         let db = state
             .db
@@ -340,6 +341,7 @@ async fn install_instance_loader(
     let mc_version = instance.game_version.clone();
     let instance_id = instance.id.clone();
     tokio::spawn(async move {
+        let _operation = operation;
         background_loader_install(
             state_clone,
             instance_id,

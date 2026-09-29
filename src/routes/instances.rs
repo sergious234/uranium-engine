@@ -379,16 +379,23 @@ async fn delete_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _operation = state.reserve(&id)?;
     let db = state.db.lock().unwrap();
     let instance = db::instances::get(&db, &id)?
         .ok_or_else(|| AppError::NotFound(format!("Instance {id} not found")))?;
 
-    db::instances::delete(&db, &id)?;
+    if instance.status == db::instances::InstanceStatus::Downloading {
+        return Err(AppError::BadRequest(format!("Instance {id} is installing")));
+    }
+    if state.running.lock().unwrap().contains_key(&id) {
+        return Err(AppError::BadRequest(format!("Instance {id} is running")));
+    }
 
     let game_dir = std::path::Path::new(&instance.game_dir);
     if game_dir.exists() {
-        let _ = std::fs::remove_dir_all(game_dir);
+        std::fs::remove_dir_all(game_dir)?;
     }
+    db::instances::delete(&db, &id)?;
 
     info!(id, "deleted from database");
     Ok(Json(serde_json::json!({ "deleted": id })))
