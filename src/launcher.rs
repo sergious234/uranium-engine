@@ -13,7 +13,7 @@
 //! ...) means adding a field to [`LaunchConfig`] and appending it in
 //! [`build_launch_config`] or [`build_java_command`] — nothing else changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use uranium_rs::minecraft::runtime::RuntimeDownloader;
 use crate::db;
 use crate::db::instances::InstanceStatus;
 use crate::error::AppError;
-use crate::paths;
+use crate::routes::settings::{Settings, load_settings};
 use crate::state::AppState;
 
 /// Window resolution used for `${resolution_*}` token substitution.
@@ -332,11 +332,19 @@ pub async fn build_launch_config(
     root: &Root,
     jar_id: &str,
 ) -> Result<LaunchConfig, AppError> {
-    let java_bin = ensure_java_runtime(root).await?;
+    let settings = load_settings()?;
+    let java_bin = if let Some(path) = configured_java(&instance.java_runtime, &settings) {
+        path
+    } else {
+        ensure_java_runtime(root)
+            .await?
+            .to_string_lossy()
+            .to_string()
+    };
     let game_dir = PathBuf::from(&instance.game_dir);
     let version = &instance.game_version;
     let version_type = root.version_type.clone();
-    let resolution = load_resolution();
+    let resolution = load_resolution(&settings);
 
     let mut jvm_args = resolve_arguments(
         &root.arguments.jvm,
@@ -349,6 +357,20 @@ pub async fn build_launch_config(
         },
     );
     jvm_args.retain(|s| !s.is_empty());
+    if let Some(global_args) = &settings.jvm_args {
+        jvm_args.extend(
+            global_args
+                .iter()
+                .filter(|arg| !arg.trim().is_empty())
+                .cloned(),
+        );
+    }
+    if !instance.java_args.trim().is_empty() {
+        let instance_args = shlex::split(&instance.java_args).ok_or_else(|| {
+            AppError::BadRequest("Invalid quoting in instance Java arguments".into())
+        })?;
+        jvm_args.extend(instance_args);
+    }
 
     let mut game_args = resolve_arguments(
         &root.arguments.game,
@@ -363,12 +385,12 @@ pub async fn build_launch_config(
     game_args.retain(|s| !s.is_empty());
 
     Ok(LaunchConfig {
-        java_bin: java_bin.to_string_lossy().to_string(),
+        java_bin,
         classpath: build_classpath(&game_dir, root, jar_id)?,
         main_class: root.main_class.clone(),
         jvm_args,
         game_args,
-        max_memory: load_max_memory(),
+        max_memory: format!("-Xmx{}", settings.max_memory.as_deref().unwrap_or("2G")),
         resolution,
     })
 }
@@ -378,10 +400,8 @@ pub fn build_java_command(config: &LaunchConfig) -> Command {
     let mut cmd = Command::new(&config.java_bin);
     cmd.arg(&config.max_memory);
 
-    if std::env::vars().any(|(k, _v)| k == "JVM_ARGS_ON") {
-        for arg in &config.jvm_args {
-            cmd.arg(arg);
-        }
+    for arg in &config.jvm_args {
+        cmd.arg(arg);
     }
 
     cmd.arg("-cp")
@@ -394,6 +414,18 @@ pub fn build_java_command(config: &LaunchConfig) -> Command {
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
+}
+
+fn configured_java(instance_runtime: &str, settings: &Settings) -> Option<String> {
+    let instance_path = instance_runtime.trim();
+    if !instance_path.is_empty() && instance_path != "java" {
+        return Some(instance_path.to_string());
+    }
+    settings
+        .java_path
+        .as_ref()
+        .filter(|path| !path.trim().is_empty())
+        .cloned()
 }
 
 /// Build a Java classpath string from the (possibly merged) version's libraries.
@@ -554,32 +586,9 @@ fn substitute_tokens(s: &str, ctx: &TokenContext) -> String {
         .replace("-cp", "")
 }
 
-/// Read the `max_memory` setting from `config.toml`.
-///
-/// Falls back to `"-Xmx4G"` if the config file does not exist or the key is
-/// missing.
-fn load_max_memory() -> String {
-    let config_path = paths::config_file();
-    if let Ok(content) = std::fs::read_to_string(&config_path)
-        && let Ok(settings) = toml::from_str::<HashMap<String, toml::Value>>(&content)
-        && let Some(toml::Value::String(mem)) = settings.get("max_memory")
-    {
-        return format!("-Xmx{mem}");
-    }
-    "-Xmx4G".to_string()
-}
-
-fn load_resolution() -> Resolution {
-    let config_path = paths::config_file();
-    if let Ok(content) = std::fs::read_to_string(&config_path)
-        && let Ok(settings) = toml::from_str::<HashMap<String, toml::Value>>(&content)
-        && let (Some(w), Some(h)) = (settings.get("window_width"), settings.get("window_height"))
-    {
-        info!("Resolution found");
-        return Resolution {
-            width: w.as_integer().expect("width is not an integer") as u32,
-            height: h.as_integer().expect("height is not an integer") as u32,
-        };
+fn load_resolution(settings: &Settings) -> Resolution {
+    if let (Some(width), Some(height)) = (settings.window_width, settings.window_height) {
+        return Resolution { width, height };
     }
 
     info!("Using fallback 1080p");
@@ -605,6 +614,57 @@ mod tests {
                 height: 1080,
             },
         }
+    }
+
+    #[test]
+    fn configured_java_prefers_instance_then_global() {
+        let mut settings = Settings::default();
+        settings.java_path = Some("/global/java".into());
+        assert_eq!(
+            configured_java("/instance/java", &settings).as_deref(),
+            Some("/instance/java")
+        );
+        assert_eq!(
+            configured_java("java", &settings).as_deref(),
+            Some("/global/java")
+        );
+        settings.java_path = None;
+        assert_eq!(configured_java("java", &settings), None);
+    }
+
+    #[test]
+    fn java_command_includes_official_and_custom_jvm_arguments() {
+        let config = LaunchConfig {
+            java_bin: "/custom/java".into(),
+            classpath: "/game/client.jar".into(),
+            main_class: "net.minecraft.client.main.Main".into(),
+            jvm_args: vec![
+                "-Djava.library.path=/game/natives".into(),
+                "-Dexample=a b".into(),
+            ],
+            game_args: vec!["--gameDir".into(), "/game".into()],
+            max_memory: "-Xmx4G".into(),
+            resolution: Resolution {
+                width: 854,
+                height: 480,
+            },
+        };
+        let command = build_java_command(&config);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &args[..4],
+            [
+                "-Xmx4G",
+                "-Djava.library.path=/game/natives",
+                "-Dexample=a b",
+                "-cp"
+            ]
+        );
+        assert_eq!(command.as_std().get_program(), "/custom/java");
     }
 
     #[test]
@@ -690,17 +750,6 @@ mod tests {
         let result = substitute_tokens("-cp ${classpath}", &ctx(&dir, "1.21"));
         // `${classpath}` and `-cp` are stripped by substitute_tokens
         assert_eq!(result, " ");
-    }
-
-    #[test]
-    fn test_load_max_memory_default() {
-        let result = load_max_memory();
-        // Should always start with -Xmx followed by a non-empty value
-        assert!(
-            result.starts_with("-Xmx"),
-            "Expected -Xmx prefix, got {result}"
-        );
-        assert!(result.len() > 4, "Expected memory value after -Xmx");
     }
 
     fn minimal_root(id: &str) -> Root {
@@ -940,6 +989,7 @@ mod tests {
             event_tx,
             running: Arc::new(Mutex::new(HashMap::new())),
             active_operations: Mutex::new(HashSet::new()),
+            auth_token: "test-token".into(),
         });
 
         let mut instance = crate::db::instances::Instance {
