@@ -52,6 +52,8 @@ struct TokenContext<'a> {
 #[derive(Debug)]
 pub struct LaunchConfig {
     pub java_bin: String,
+    /// Working directory for Minecraft and loader-generated files.
+    pub working_dir: PathBuf,
     pub classpath: String,
     pub main_class: String,
     /// JVM arguments resolved from the version JSON (applied only when the
@@ -386,6 +388,7 @@ pub async fn build_launch_config(
 
     Ok(LaunchConfig {
         java_bin,
+        working_dir: game_dir.clone(),
         classpath: build_classpath(&game_dir, root, jar_id)?,
         main_class: root.main_class.clone(),
         jvm_args,
@@ -398,6 +401,7 @@ pub async fn build_launch_config(
 /// Build the Java process command from a [`LaunchConfig`].
 pub fn build_java_command(config: &LaunchConfig) -> Command {
     let mut cmd = Command::new(&config.java_bin);
+    cmd.current_dir(&config.working_dir);
     cmd.arg(&config.max_memory);
 
     for arg in &config.jvm_args {
@@ -636,6 +640,7 @@ mod tests {
     fn java_command_includes_official_and_custom_jvm_arguments() {
         let config = LaunchConfig {
             java_bin: "/custom/java".into(),
+            working_dir: PathBuf::from("/game"),
             classpath: "/game/client.jar".into(),
             main_class: "net.minecraft.client.main.Main".into(),
             jvm_args: vec![
@@ -665,6 +670,7 @@ mod tests {
             ]
         );
         assert_eq!(command.as_std().get_program(), "/custom/java");
+        assert_eq!(command.as_std().get_current_dir(), Some(Path::new("/game")));
     }
 
     #[test]
