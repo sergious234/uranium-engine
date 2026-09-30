@@ -250,6 +250,47 @@ async fn background_mrpack_download(
     });
 }
 
+/// Recreate an interrupted pack installer from the persisted source path.
+/// If the user removed the original pack, record an error instead of leaving
+/// the instance permanently in the downloading state.
+pub async fn resume_mrpack(
+    state: Arc<AppState>,
+    instance: db::instances::Instance,
+    game_dir: PathBuf,
+) {
+    let pack_path = match &instance.modpack_path {
+        Some(path) => PathBuf::from(path),
+        None => {
+            fail_resumed_install(&state, &instance.id, "Pack source path is missing".into());
+            return;
+        }
+    };
+    let installer = tokio::task::spawn_blocking(move || {
+        RinthInstaller::<Downloader>::with_side(&pack_path, &game_dir, Side::Client)
+            .map(|installer| (installer, game_dir))
+    })
+    .await;
+    match installer {
+        Ok(Ok((installer, game_dir))) => {
+            background_mrpack_download(state, instance, game_dir, installer).await;
+        }
+        Ok(Err(error)) => fail_resumed_install(&state, &instance.id, error.to_string()),
+        Err(error) => fail_resumed_install(&state, &instance.id, error.to_string()),
+    }
+}
+
+fn fail_resumed_install(state: &Arc<AppState>, instance_id: &str, error: String) {
+    tracing::error!(instance_id, "Could not resume pack install: {error}");
+    let db = state.db.lock().unwrap();
+    if let Err(db_error) = db::instances::update_status(&db, instance_id, "error") {
+        tracing::error!(instance_id, "Could not persist install failure: {db_error}");
+    }
+    let _ = state.event_tx.send(AppEvent::InstanceError {
+        instance_id: instance_id.to_string(),
+        error,
+    });
+}
+
 /// `POST /instances/{id}/loader` — install (or re-install) the loader for a
 /// modpack instance.
 ///
@@ -283,6 +324,7 @@ async fn install_instance_loader(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<CreateInstanceResponse>), AppError> {
+    let operation = state.reserve(&id)?;
     let instance = {
         let db = state
             .db
@@ -340,6 +382,7 @@ async fn install_instance_loader(
     let mc_version = instance.game_version.clone();
     let instance_id = instance.id.clone();
     tokio::spawn(async move {
+        let _operation = operation;
         background_loader_install(
             state_clone,
             instance_id,

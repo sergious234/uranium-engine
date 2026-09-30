@@ -5,10 +5,14 @@ HTTP + WebSocket server that wraps [`uranium-rs`](https://github.com/anomalyco/u
 ## Quick Start
 
 ```bash
-cargo run
+URANIUM_API_TOKEN="$(openssl rand -hex 32)" cargo run
 ```
 
 Server binds to `127.0.0.1:13715`.
+Set `URANIUM_API_TOKEN` to a secret value before starting the server. Send it as
+`X-Uranium-Token` with every HTTP request; WebSocket clients use
+`/ws?token=<value>`. Requests without the token receive `401 Unauthorized`.
+The Tauri launcher creates and passes its own token when it starts the sidecar.
 
 ## REST Endpoints
 

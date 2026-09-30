@@ -2369,6 +2369,8 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
+ "shlex",
  "strum",
  "strum_macros",
  "tempfile",

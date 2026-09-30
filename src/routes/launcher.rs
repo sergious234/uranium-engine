@@ -93,6 +93,7 @@ async fn launch_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<LaunchResponse>, AppError> {
+    let _operation = state.reserve(&id)?;
     let instance = launcher::validate_launchable(&state, &id)?;
     let game_dir = std::path::PathBuf::from(&instance.game_dir);
 

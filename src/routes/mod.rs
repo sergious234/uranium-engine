@@ -1,4 +1,9 @@
 use axum::Router;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -69,7 +74,36 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(modpacks::router())
         .merge(launcher::router())
         .merge(settings::router())
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
+}
+
+async fn require_token(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let supplied = if request.uri().path() == "/ws" {
+        request.uri().query().and_then(|query| {
+            query
+                .split('&')
+                .find_map(|part| part.strip_prefix("token="))
+        })
+    } else {
+        request
+            .headers()
+            .get(HeaderName::from_static("x-uranium-token"))
+            .and_then(|value| value.to_str().ok())
+    };
+    if supplied != Some(state.auth_token.as_str()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("x-uranium-engine"),
+        HeaderValue::from_static("0.1.0"),
+    );
+    Ok(response)
 }
 
 /// `GET /health` — server health check.

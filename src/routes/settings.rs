@@ -56,6 +56,11 @@ impl Default for Settings {
     )
 )]
 async fn get_settings() -> Result<Json<Settings>, AppError> {
+    Ok(Json(load_settings()?))
+}
+
+/// Load the same settings used by the API and the launch pipeline.
+pub fn load_settings() -> Result<Settings, AppError> {
     let config_path = paths::config_file();
     let settings = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
@@ -63,7 +68,7 @@ async fn get_settings() -> Result<Json<Settings>, AppError> {
     } else {
         Settings::default()
     };
-    Ok(Json(settings))
+    Ok(settings)
 }
 
 /// `PUT /settings` — write new settings.

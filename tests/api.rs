@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ struct TestApp {
     addr: String,
     _temp_dir: tempfile::TempDir,
     event_tx: broadcast::Sender<AppEvent>,
+    state: Arc<AppState>,
 }
 
 impl TestApp {
@@ -24,7 +25,16 @@ impl TestApp {
     }
 
     fn ws_url(&self, path: &str) -> String {
-        format!("ws://{}{}", self.addr, path)
+        format!("ws://{}{}?token=test-token", self.addr, path)
+    }
+
+    fn client(&self) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-uranium-token", "test-token".parse().unwrap());
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
     }
 }
 
@@ -38,9 +48,11 @@ async fn setup() -> TestApp {
         db: Mutex::new(conn),
         event_tx: event_tx.clone(),
         running: Arc::new(Mutex::new(HashMap::new())),
+        active_operations: Mutex::new(HashSet::new()),
+        auth_token: "test-token".into(),
     });
 
-    let app = routes::router(state);
+    let app = routes::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -57,7 +69,31 @@ async fn setup() -> TestApp {
         addr: format!("127.0.0.1:{}", addr.port()),
         _temp_dir: temp_dir,
         event_tx,
+        state,
     }
+}
+
+fn insert_test_instance(app: &TestApp, id: &str, status: db::instances::InstanceStatus) {
+    let instance = db::instances::Instance {
+        id: id.into(),
+        name: "Test".into(),
+        game_version: "1.21".into(),
+        icon: "Grass".into(),
+        game_dir: app._temp_dir.path().join(id).to_string_lossy().to_string(),
+        status,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        last_played: None,
+        playtime_seconds: 0,
+        java_runtime: "java".into(),
+        java_args: String::new(),
+        modpack_source: db::instances::ModpackSource::Vanilla,
+        modpack_path: None,
+        loader: None,
+        loader_version: None,
+        loader_profile: None,
+    };
+    db::instances::insert(&app.state.db.lock().unwrap(), &instance).unwrap();
+    std::fs::create_dir(&instance.game_dir).unwrap();
 }
 
 // ── Health ─────────────────────────────────────────────────────────
@@ -65,9 +101,25 @@ async fn setup() -> TestApp {
 #[tokio::test]
 async fn test_health() {
     let app = setup().await;
-    let resp = reqwest::get(app.url("/health")).await.unwrap();
+    let resp = app.client().get(app.url("/health")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "OK");
+}
+
+#[tokio::test]
+async fn test_http_and_websocket_reject_missing_token() {
+    let app = setup().await;
+    let response = reqwest::Client::new()
+        .get(app.url("/instances"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+    assert!(
+        connect_async(format!("ws://{}/ws", app.addr))
+            .await
+            .is_err()
+    );
 }
 
 // ── Create Instance ────────────────────────────────────────────────
@@ -75,7 +127,7 @@ async fn test_health() {
 #[tokio::test]
 async fn test_create_instance_returns_202() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "Test 1.21", "version": "1.21"}))
@@ -92,7 +144,7 @@ async fn test_create_instance_returns_202() {
 #[tokio::test]
 async fn test_create_instance_persists_to_db() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "Vanilla", "version": "1.20.4", "icon": "Emerald"}))
@@ -121,7 +173,12 @@ async fn test_create_instance_persists_to_db() {
 #[tokio::test]
 async fn test_list_instances_empty() {
     let app = setup().await;
-    let resp = reqwest::get(app.url("/instances")).await.unwrap();
+    let resp = app
+        .client()
+        .get(app.url("/instances"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body.as_array().unwrap().len(), 0);
@@ -130,7 +187,7 @@ async fn test_list_instances_empty() {
 #[tokio::test]
 async fn test_list_instances_with_entries() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "A", "version": "1.21"}))
@@ -154,7 +211,10 @@ async fn test_list_instances_with_entries() {
 #[tokio::test]
 async fn test_get_instance_not_found() {
     let app = setup().await;
-    let resp = reqwest::get(app.url("/instances/no-such-id"))
+    let resp = app
+        .client()
+        .get(app.url("/instances/no-such-id"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
@@ -167,7 +227,7 @@ async fn test_get_instance_not_found() {
 #[tokio::test]
 async fn test_patch_instance_rename() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let create_resp = client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "Old Name", "version": "1.21"}))
@@ -194,7 +254,7 @@ async fn test_patch_instance_rename() {
 #[tokio::test]
 async fn test_patch_instance_not_found() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .patch(app.url("/instances/no-such-id"))
         .json(&serde_json::json!({"name": "Nope"}))
@@ -209,17 +269,9 @@ async fn test_patch_instance_not_found() {
 #[tokio::test]
 async fn test_delete_instance() {
     let app = setup().await;
-    let client = reqwest::Client::new();
-    let create_resp = client
-        .post(app.url("/instances"))
-        .json(&serde_json::json!({"name": "ToDelete", "version": "1.21"}))
-        .send()
-        .await
-        .unwrap();
-    let id = create_resp.json::<serde_json::Value>().await.unwrap()["instance_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let client = app.client();
+    let id = "to-delete";
+    insert_test_instance(&app, id, db::instances::InstanceStatus::Ready);
 
     let resp = client
         .delete(app.url(&format!("/instances/{id}")))
@@ -227,6 +279,7 @@ async fn test_delete_instance() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    assert!(!app._temp_dir.path().join(id).exists());
 
     let resp = client
         .get(app.url(&format!("/instances/{id}")))
@@ -237,9 +290,55 @@ async fn test_delete_instance() {
 }
 
 #[tokio::test]
+async fn test_delete_rejects_installing_and_preserves_files() {
+    let app = setup().await;
+    insert_test_instance(
+        &app,
+        "installing",
+        db::instances::InstanceStatus::Downloading,
+    );
+    let resp = app
+        .client()
+        .delete(app.url("/instances/installing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(app._temp_dir.path().join("installing").exists());
+    assert!(
+        db::instances::get(&app.state.db.lock().unwrap(), "installing")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_delete_rejects_running_and_preserves_files() {
+    let app = setup().await;
+    insert_test_instance(&app, "running", db::instances::InstanceStatus::Ready);
+    let (kill_tx, _) = tokio::sync::oneshot::channel();
+    app.state.running.lock().unwrap().insert(
+        "running".into(),
+        uranium_engine::state::RunningGame {
+            pid: 123,
+            started_at: std::time::Instant::now(),
+            kill_tx: Some(kill_tx),
+        },
+    );
+    let resp = app
+        .client()
+        .delete(app.url("/instances/running"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(app._temp_dir.path().join("running").exists());
+}
+
+#[tokio::test]
 async fn test_delete_instance_not_found() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .delete(app.url("/instances/no-such-id"))
         .send()
@@ -253,7 +352,7 @@ async fn test_delete_instance_not_found() {
 #[tokio::test]
 async fn test_settings_roundtrip() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
 
     let input = serde_json::json!({
         "java_path": "/usr/lib/jvm/java-21/bin/java",
@@ -284,11 +383,7 @@ async fn test_settings_roundtrip() {
 #[tokio::test]
 async fn test_settings_returns_valid_json() {
     let app = setup().await;
-    let resp = reqwest::Client::new()
-        .get(app.url("/settings"))
-        .send()
-        .await
-        .unwrap();
+    let resp = app.client().get(app.url("/settings")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     // Must have all expected keys (values depend on config file state)
@@ -305,11 +400,7 @@ async fn test_settings_returns_valid_json() {
 #[tokio::test]
 async fn test_running_empty() {
     let app = setup().await;
-    let resp = reqwest::Client::new()
-        .get(app.url("/running"))
-        .send()
-        .await
-        .unwrap();
+    let resp = app.client().get(app.url("/running")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["running"].as_array().unwrap().len(), 0);
@@ -318,7 +409,7 @@ async fn test_running_empty() {
 #[tokio::test]
 async fn test_launch_not_found() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .post(app.url("/launch/no-such-id"))
         .send()
@@ -330,7 +421,7 @@ async fn test_launch_not_found() {
 #[tokio::test]
 async fn test_launch_not_ready() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let create_resp = client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "NotReady", "version": "1.21"}))
@@ -353,7 +444,7 @@ async fn test_launch_not_ready() {
 #[tokio::test]
 async fn test_terminate_not_found() {
     let app = setup().await;
-    let client = reqwest::Client::new();
+    let client = app.client();
     let resp = client
         .post(app.url("/terminate/no-such-id"))
         .send()
@@ -418,7 +509,7 @@ async fn test_background_download_emits_error_event() {
         .await
         .expect("WebSocket connection should succeed");
 
-    let client = reqwest::Client::new();
+    let client = app.client();
     client
         .post(app.url("/instances"))
         .json(&serde_json::json!({"name": "BSOD", "version": "999.999.999"}))

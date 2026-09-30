@@ -1,4 +1,4 @@
 [submodule "uranium-rs"]
 	path = uranium-rs
-	url = git@github.com:sergious234/uranium-rs.git
+	url = https://github.com/sergious234/uranium-rs.git
 	branch = dev

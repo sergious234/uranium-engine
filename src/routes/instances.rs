@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{io::Read, path::Path as FsPath};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -6,12 +7,14 @@ use axum::routing::get;
 use axum::{Json, Router};
 use fs_extra::dir::get_size;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use tracing::{info, warn};
 
 use uranium_rs::engine::Downloader;
+use uranium_rs::mine_data_structs::minecraft::Root;
 use uranium_rs::minecraft::list_instances as get_mc_versions;
 use uranium_rs::minecraft::profile::add_instance;
 use uranium_rs::minecraft::{MinecraftDownloadState, MinecraftDownloader};
@@ -33,6 +36,39 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/mc-versions", get(mc_versions))
         .route("/instances/clean", get(clean))
+}
+
+/// Restore downloads that were interrupted when the previous engine process exited.
+/// Existing files are verified by the downloader before they are reused.
+pub async fn resume_pending(state: Arc<AppState>) {
+    let pending = {
+        let db = state.db.lock().unwrap();
+        match db::instances::get_all(&db) {
+            Ok(instances) => instances
+                .into_iter()
+                .filter(|instance| instance.status == db::instances::InstanceStatus::Downloading)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::error!("Could not list interrupted installs: {error}");
+                return;
+            }
+        }
+    };
+
+    for instance in pending {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let game_dir = std::path::PathBuf::from(&instance.game_dir);
+            match instance.modpack_source {
+                db::instances::ModpackSource::Vanilla => {
+                    background_download(state, instance, game_dir).await;
+                }
+                db::instances::ModpackSource::Mrpack => {
+                    super::modpacks::resume_mrpack(state, instance, game_dir).await;
+                }
+            }
+        });
+    }
 }
 
 /// Request body for [`create_instance`].
@@ -229,6 +265,67 @@ pub(crate) fn finalize_download(game_dir: &std::path::Path, instance: &db::insta
     }
 }
 
+/// The upstream downloader skips a client jar as soon as its path exists. An
+/// interrupted download can leave an empty or partial jar at that path, so
+/// remove it before rebuilding the download queue.
+fn check_client_jar(
+    game_dir: &FsPath,
+    version: &str,
+    remove_invalid: bool,
+) -> Result<bool, AppError> {
+    let version_dir = game_dir.join("versions").join(version);
+    let profile_path = version_dir.join(format!("{version}.json"));
+    let profile = match std::fs::read(&profile_path) {
+        Ok(bytes) => match serde_json::from_slice::<Root>(&bytes) {
+            Ok(profile) => profile,
+            Err(error) if remove_invalid => {
+                warn!("Removing incomplete version profile {profile_path:?}: {error}");
+                std::fs::remove_file(profile_path)?;
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "Invalid version profile: {error}"
+                )));
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && remove_invalid => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let client = profile
+        .downloads
+        .get("client")
+        .ok_or_else(|| AppError::Internal(format!("Version {version} has no client download")))?;
+    let jar_path = version_dir.join(format!("{version}.jar"));
+    let valid = file_matches_sha1(&jar_path, &client.sha1)?;
+    if !valid && remove_invalid && jar_path.exists() {
+        warn!("Removing invalid client jar {jar_path:?}");
+        std::fs::remove_file(jar_path)?;
+    }
+    Ok(valid)
+}
+
+fn file_matches_sha1(path: &FsPath, expected: &str) -> Result<bool, std::io::Error> {
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            let mut hash = Sha1::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+            }
+            Ok(format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Background task that downloads Minecraft files for a newly created instance.
 ///
 /// The task loops through [`MinecraftDownloader::progress`], broadcasting
@@ -253,6 +350,15 @@ async fn background_download(
         });
         let db = state.db.lock().unwrap();
         let _ = db::instances::update_status(&db, &instance_id, "error");
+        return;
+    }
+
+    if let Err(error) = check_client_jar(&game_dir, &version, true) {
+        fail_download(
+            &state,
+            &instance_id,
+            &format!("Client check failed: {error}"),
+        );
         return;
     }
 
@@ -299,6 +405,26 @@ async fn background_download(
         }
     }
 
+    match check_client_jar(&game_dir, &version, false) {
+        Ok(true) => {}
+        Ok(false) => {
+            fail_download(
+                &state,
+                &instance_id,
+                "Client download is incomplete or corrupt",
+            );
+            return;
+        }
+        Err(error) => {
+            fail_download(
+                &state,
+                &instance_id,
+                &format!("Client check failed: {error}"),
+            );
+            return;
+        }
+    }
+
     finalize_download(&game_dir, &instance);
 
     {
@@ -308,6 +434,16 @@ async fn background_download(
     let _ = state.event_tx.send(AppEvent::InstanceCompleted {
         instance_id: instance_id.clone(),
     });
+}
+
+fn fail_download(state: &AppState, instance_id: &str, message: &str) {
+    tracing::error!("{message}");
+    let _ = state.event_tx.send(AppEvent::InstanceError {
+        instance_id: instance_id.to_string(),
+        error: message.to_string(),
+    });
+    let db = state.db.lock().unwrap();
+    let _ = db::instances::update_status(&db, instance_id, "error");
 }
 
 /// `PATCH /instances/{id}` — update an instance's name, icon, runtime, and/or args.
@@ -379,16 +515,23 @@ async fn delete_instance(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let _operation = state.reserve(&id)?;
     let db = state.db.lock().unwrap();
     let instance = db::instances::get(&db, &id)?
         .ok_or_else(|| AppError::NotFound(format!("Instance {id} not found")))?;
 
-    db::instances::delete(&db, &id)?;
+    if instance.status == db::instances::InstanceStatus::Downloading {
+        return Err(AppError::BadRequest(format!("Instance {id} is installing")));
+    }
+    if state.running.lock().unwrap().contains_key(&id) {
+        return Err(AppError::BadRequest(format!("Instance {id} is running")));
+    }
 
     let game_dir = std::path::Path::new(&instance.game_dir);
     if game_dir.exists() {
-        let _ = std::fs::remove_dir_all(game_dir);
+        std::fs::remove_dir_all(game_dir)?;
     }
+    db::instances::delete(&db, &id)?;
 
     info!(id, "deleted from database");
     Ok(Json(serde_json::json!({ "deleted": id })))
@@ -443,4 +586,23 @@ async fn clean(State(state): State<Arc<AppState>>) -> Result<Json<CleanResponse>
         removed_instances,
         freed_memory,
     }))
+}
+
+#[cfg(test)]
+mod client_jar_tests {
+    use super::file_matches_sha1;
+
+    #[test]
+    fn detects_missing_empty_and_corrupt_client_jar() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("client.jar");
+        let expected = "a9993e364706816aba3e25717850c26c9cd0d89d";
+        assert!(!file_matches_sha1(&jar, expected).unwrap());
+        std::fs::write(&jar, []).unwrap();
+        assert!(!file_matches_sha1(&jar, expected).unwrap());
+        std::fs::write(&jar, b"abc").unwrap();
+        assert!(file_matches_sha1(&jar, expected).unwrap());
+        std::fs::write(&jar, b"abd").unwrap();
+        assert!(!file_matches_sha1(&jar, expected).unwrap());
+    }
 }
