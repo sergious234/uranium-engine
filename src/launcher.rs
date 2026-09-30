@@ -393,7 +393,7 @@ pub async fn build_launch_config(
         main_class: root.main_class.clone(),
         jvm_args,
         game_args,
-        max_memory: format!("-Xmx{}", settings.max_memory.as_deref().unwrap_or("2G")),
+        max_memory: format!("-Xmx{}", settings.max_memory.as_deref().unwrap_or("4G")),
         resolution,
     })
 }
@@ -622,8 +622,10 @@ mod tests {
 
     #[test]
     fn configured_java_prefers_instance_then_global() {
-        let mut settings = Settings::default();
-        settings.java_path = Some("/global/java".into());
+        let mut settings = Settings {
+            java_path: Some("/global/java".into()),
+            ..Settings::default()
+        };
         assert_eq!(
             configured_java("/instance/java", &settings).as_deref(),
             Some("/instance/java")

@@ -107,6 +107,21 @@ async fn test_health() {
 }
 
 #[tokio::test]
+async fn test_health_and_docs_are_public() {
+    let app = setup().await;
+    let client = reqwest::Client::new();
+    let resp = client.get(app.url("/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "OK");
+    let resp = client
+        .get(app.url("/api-docs/openapi.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
 async fn test_http_and_websocket_reject_missing_token() {
     let app = setup().await;
     let response = reqwest::Client::new()

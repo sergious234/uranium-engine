@@ -19,7 +19,7 @@ pub struct Settings {
     /// Path to a custom Java executable. If `None`, the Mojang bundled runtime
     /// is used (downloaded via `RuntimeDownloader`).
     pub java_path: Option<String>,
-    /// Max memory for the JVM, e.g. `"2G"` or `"4096M"`. Default: `"2G"`.
+    /// Max memory for the JVM, e.g. `"4G"` or `"4096M"`. Default: `"4G"`.
     pub max_memory: Option<String>,
     /// Additional JVM arguments to pass when launching Minecraft.
     pub jvm_args: Option<Vec<String>>,
@@ -35,7 +35,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             java_path: None,
-            max_memory: Some("2G".into()),
+            max_memory: Some("4G".into()),
             jvm_args: None,
             window_width: Some(854),
             window_height: Some(480),

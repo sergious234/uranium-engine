@@ -4,7 +4,7 @@ HTTP + WebSocket server wrapping `uranium-rs` for launcher GUIs. Single crate (`
 
 ## Commands
 
-- `cargo run` — serve (tracing filter via `RUST_LOG`, default `info`).
+- `URANIUM_API_TOKEN="$(openssl rand -hex 32)" cargo run` — serve (tracing filter via `RUST_LOG`, default `info`). The token is required; the server panics without it. Tests build `AppState` with `"test-token"` directly, so no env is needed for `cargo test`.
 - `cargo test --offline` — full suite (unit + `tests/`). Prefer `--offline`; deps are vendored/locked.
 - Focused: `cargo test --test api <name>`, `cargo test --test mrpack`, `cargo test events::`, `cargo test launcher::`.
 - Before finishing: `cargo fmt && cargo clippy --all-targets && cargo test --offline`.
@@ -13,7 +13,7 @@ HTTP + WebSocket server wrapping `uranium-rs` for launcher GUIs. Single crate (`
 ## Structure
 
 - `src/main.rs` — tracing, `paths::ensure_dirs`, `db::init`, `AppState`, router, bind.
-- `src/state.rs` — `AppState { db: Mutex<Connection>, event_tx: broadcast(256), running }`. One `rusqlite` connection (bundled) behind a std `Mutex`: lock briefly, never hold across `.await`.
+- `src/state.rs` — `AppState { db: Mutex<Connection>, event_tx: broadcast(256), running, active_operations, auth_token }`. One `rusqlite` connection (bundled) behind a std `Mutex`: lock briefly, never hold across `.await`. `reserve(id)` guards launch/loader-install/delete races via `InstanceOperation` (RAII release on drop).
 - `src/routes/` — `instances.rs` (vanilla CRUD + background download), `modpacks.rs` (mrpack install + loader repair), `launcher.rs` (launch/terminate/running), `settings.rs`, `ws.rs`. Registered in `routes/mod.rs` (`router()` + `ApiDoc`).
 - `src/launcher.rs` — launch pipeline: `validate_launchable` → `load_merged_root` → `ensure_java_runtime` → `build_launch_config` → `build_java_command`. New launch params go on `LaunchConfig` only.
 - `src/events.rs` — `AppEvent` (`#[serde(tag="event", content="data")]`) + `PhaseProgressTracker`.
@@ -29,7 +29,8 @@ HTTP + WebSocket server wrapping `uranium-rs` for launcher GUIs. Single crate (`
 - Status semantics: mrpack failure → `error`; loader-repair failure (`POST /instances/{id}/loader`) keeps `ready`. Never invent `InstanceStatus` variants.
 - Launch gate: `loader.is_some() && loader_profile.is_none()` → 400. GUI gates Play on `loader_profile`. Forge/NeoForge packs are 400 (no installer); repair endpoint is Fabric/Quilt only.
 - `load_merged_root` merges `inheritsFrom` at `serde_json::Value` level (loader profiles omit required `Root` fields): depth cap 8 + cycle guard, child-first libs deduped by exact `name`, jar owner = nearest `downloads.client`, Maven-coordinate fallback for `downloads: null` libs. Classpath joins with `:` (Unix-only).
-- `build_java_command` applies version `jvm_args` only when `JVM_ARGS_ON` is set. Tokens use offline placeholders (`player1`, zero UUID).
+- Auth (`routes/mod.rs::require_token`, applied as `route_layer` over every merged router): HTTP needs `X-Uranium-Token`, `/ws` takes `?token=`. Public without token: `GET /health`, `/docs` (+ assets), `/api-docs/openapi.json`. CORS allows Tauri origins only.
+- `build_java_command` always applies version `jvm_args` plus global `settings.jvm_args` plus per-instance `java_args` (`shlex`-split, 400 on bad quoting). Default max memory is `"4G"` (`Settings::default` + `unwrap_or`). Tokens use offline placeholders (`player1`, zero UUID).
 - Tests (`tests/api.rs`, `tests/mrpack.rs`) spin a real axum server on `127.0.0.1:0` with a `tempfile` DB + 50ms sleep — but **settings tests read/write the real `~/.config/uranium-engine/config.toml`**. Don't run settings tests if local config matters, or back it up.
 - License conflict (unresolved): `Cargo.toml` says `GPL-2.0`, `README.md` says MIT. Don't change either without asking.
 - No CI, no `opencode.json`, no formatter/linter config beyond defaults. `ENGINE_PLAN.md` is stale design prose (vanilla-only scope, old line counts) — trust code over it.

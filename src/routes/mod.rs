@@ -83,6 +83,17 @@ async fn require_token(
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // Public endpoints for health checks and manual browser access to the
+    // API docs. Everything else needs `X-Uranium-Token` (`/ws` takes
+    // `?token=` instead since browsers can't set headers on upgrade).
+    let path = request.uri().path();
+    let public = path == "/health"
+        || path == "/api-docs/openapi.json"
+        || path == "/docs"
+        || path.starts_with("/docs/");
+    if public {
+        return Ok(next.run(request).await);
+    }
     let supplied = if request.uri().path() == "/ws" {
         request.uri().query().and_then(|query| {
             query

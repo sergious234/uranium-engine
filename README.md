@@ -13,6 +13,8 @@ Set `URANIUM_API_TOKEN` to a secret value before starting the server. Send it as
 `X-Uranium-Token` with every HTTP request; WebSocket clients use
 `/ws?token=<value>`. Requests without the token receive `401 Unauthorized`.
 The Tauri launcher creates and passes its own token when it starts the sidecar.
+Public (no token, browser-friendly): `GET /health`, `GET /docs`,
+`GET /api-docs/openapi.json`.
 
 ## REST Endpoints
 
@@ -137,7 +139,7 @@ Response:
 // GET /settings, PUT /settings
 {
   "java_path": null,
-  "max_memory": "2G",
+  "max_memory": "4G",
   "jvm_args": null,
   "window_width": 854,
   "window_height": 480,
